@@ -133,7 +133,7 @@ build_backend() {
         -v "${HOME}/.m2:/root/.m2" \
         -v "${mvn_home}:/opt/mvn:ro" \
         -w /app \
-        eclipse-temurin:21-jdk-jammy \
+        eclipse-temurin:25-jdk-jammy \
         sh -c 'export MAVEN_HOME=/opt/mvn && export PATH=$MAVEN_HOME/bin:$PATH && mvn clean package -DskipTests -q'
 
     [[ -f "$JAR_PATH" ]] || die "Maven 构建成功但未找到 JAR: $JAR_PATH"
@@ -202,7 +202,11 @@ cmd_up() {
     fi
 
     step "启动所有服务..."
-    compose up -d --remove-orphans
+    if $do_build; then
+        compose up -d --build --remove-orphans
+    else
+        compose up -d --remove-orphans
+    fi
 
     echo ""
     wait_for_db
@@ -234,10 +238,16 @@ cmd_restart() {
     case "$svc" in
         db|backend|frontend)
             local build_flag="${2:-}"
-            [[ "$svc" == "backend"  && "$build_flag" == "--build" ]] && build_backend
-            [[ "$svc" == "frontend" && "$build_flag" == "--build" ]] && build_frontend
+            if [[ "$svc" == "backend" && "$build_flag" == "--build" ]]; then
+                build_backend
+                compose build backend
+            fi
+            if [[ "$svc" == "frontend" && "$build_flag" == "--build" ]]; then
+                build_frontend
+                compose build frontend
+            fi
             info "重启服务: $svc"
-            compose restart "$svc"
+            compose up -d --no-deps "$svc"
             ok "服务 '$svc' 已重启"
             ;;
         *)
