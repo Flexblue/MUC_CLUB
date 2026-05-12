@@ -3,6 +3,7 @@ package com.club.management.service;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.club.management.common.ErrorCode;
 import com.club.management.common.Result;
+import com.club.management.config.DynamicDataSource;
 import com.club.management.entity.Club;
 import com.club.management.mapper.ClubMapper;
 import org.slf4j.Logger;
@@ -25,6 +26,9 @@ public class ClubService {
 
     @Autowired
     private ClubMapper clubMapper;
+
+    @Autowired
+    private DynamicDataSource dynamicDataSource;
 
     /**
      * 获取所有启用的社团列表
@@ -120,6 +124,13 @@ public class ClubService {
             int result = clubMapper.insert(club);
             if (result > 0) {
                 logger.info("创建社团成功: {}", club.getName());
+                // 立即注册数据源，无需重启即可路由到新社团数据库
+                try {
+                    dynamicDataSource.registerClubDataSource(club);
+                } catch (Exception e) {
+                    // 数据源注册失败不影响社团记录已写入，首次请求时会按需重试
+                    logger.warn("社团记录已创建，但数据源预注册失败（首次请求时将自动重试）: {}", e.getMessage());
+                }
                 return Result.success(club);
             } else {
                 logger.error("创建社团失败: 数据库插入失败");
@@ -184,6 +195,17 @@ public class ClubService {
             int result = clubMapper.updateById(club);
             if (result > 0) {
                 logger.info("更新社团状态成功: {} - {}", club.getName(), status == 1 ? "启用" : "禁用");
+                if (status == 0) {
+                    // 禁用：关闭连接池，释放资源
+                    dynamicDataSource.evictClubDataSource(id);
+                } else {
+                    // 重新启用：立即重建连接池
+                    try {
+                        dynamicDataSource.registerClubDataSource(club);
+                    } catch (Exception e) {
+                        logger.warn("社团重新启用，数据源预注册失败（首次请求时将自动重试）: {}", e.getMessage());
+                    }
+                }
                 return Result.success(null);
             } else {
                 return Result.error(ErrorCode.SYSTEM_ERROR, "更新社团状态失败");

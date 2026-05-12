@@ -14,11 +14,19 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
- * 动态数据源配置
+ * 动态数据源配置。
+ *
+ * 职责：
+ *   1. 构建主库 HikariCP 连接池
+ *   2. 构建 DynamicDataSource Bean，注入主库和社团库连接参数
+ *   3. 启动时预加载已有社团的连接池（提升首次请求响应速度）
+ *
+ * 新增社团无需重启：DynamicDataSource 内部按需建池，详见该类注释。
  */
 @Configuration
 public class DynamicDataSourceConfig {
@@ -47,63 +55,34 @@ public class DynamicDataSourceConfig {
     private String clubPassword;
 
     /**
-     * 创建主数据源 (用于访问 club_master)
+     * 构建主库连接池（访问 clubs 元数据表）。
      */
-    private DataSource createMasterDataSource() {
-        logger.info("创建主数据源: {}", masterUrl);
-
+    private DataSource buildMasterDataSource() {
+        logger.info("Building master datasource: {}", masterUrl);
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(masterUrl);
         config.setUsername(masterUsername);
         config.setPassword(masterPassword);
         config.setDriverClassName("com.mysql.cj.jdbc.Driver");
-
-        // 连接池配置
         config.setMinimumIdle(5);
         config.setMaximumPoolSize(20);
         config.setConnectionTimeout(30000);
         config.setIdleTimeout(600000);
         config.setMaxLifetime(1800000);
+        config.setInitializationFailTimeout(-1);
         config.setPoolName("MasterPool");
-
         return new HikariDataSource(config);
     }
 
     /**
-     * 创建社团数据源
+     * 从主库读取所有启用的社团（仅用于启动预热）。
      */
-    private DataSource createClubDataSource(Club club) {
-        String url = clubUrlPrefix + club.getDbName() + clubUrlSuffix;
-        logger.info("创建社团数据源: {} - {}", club.getName(), url);
-
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(url);
-        config.setUsername(clubUsername);
-        config.setPassword(clubPassword);
-        config.setDriverClassName("com.mysql.cj.jdbc.Driver");
-
-        // 连接池配置 (社团数据源使用较小的连接池)
-        config.setMinimumIdle(3);
-        config.setMaximumPoolSize(10);
-        config.setConnectionTimeout(30000);
-        config.setIdleTimeout(600000);
-        config.setMaxLifetime(1800000);
-        config.setPoolName("ClubPool-" + club.getId());
-
-        return new HikariDataSource(config);
-    }
-
-    /**
-     * 从主数据库加载所有社团配置
-     */
-    private Map<Long, Club> loadClubsFromMaster() {
-        Map<Long, Club> clubs = new HashMap<>();
-        DataSource masterDataSource = createMasterDataSource();
-
-        try (Connection conn = masterDataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT * FROM clubs WHERE status = 1");
+    private List<Club> loadActiveClubs(DataSource masterDs) {
+        List<Club> clubs = new ArrayList<>();
+        try (Connection conn = masterDs.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT id, name, code, db_name, status FROM clubs WHERE status = 1");
              ResultSet rs = ps.executeQuery()) {
-
             while (rs.next()) {
                 Club club = new Club();
                 club.setId(rs.getLong("id"));
@@ -111,58 +90,54 @@ public class DynamicDataSourceConfig {
                 club.setCode(rs.getString("code"));
                 club.setDbName(rs.getString("db_name"));
                 club.setStatus(rs.getInt("status"));
-
-                clubs.put(club.getId(), club);
-                logger.info("加载社团配置: {} - {}", club.getId(), club.getName());
+                clubs.add(club);
             }
-
-            logger.info("成功加载 {} 个社团配置", clubs.size());
-
+            logger.info("Loaded {} active clubs for datasource pre-warming", clubs.size());
         } catch (Exception e) {
-            logger.error("加载社团配置失败", e);
-            throw new RuntimeException("加载社团配置失败", e);
+            logger.error("Failed to load clubs from master during startup", e);
         }
-
         return clubs;
     }
 
     /**
-     * 配置动态数据源
+     * 主 DataSource Bean。
+     *
+     * 返回类型为 DynamicDataSource（而非 DataSource）使 ClubService 可以直接
+     * Autowire DynamicDataSource 并调用 registerClubDataSource / evictClubDataSource。
      */
     @Bean
     @Primary
-    public DataSource dynamicDataSource() {
-        logger.info("初始化动态数据源...");
+    public DynamicDataSource dynamicDataSource() {
+        logger.info("Initializing DynamicDataSource...");
 
-        // 1. 加载所有社团配置
-        Map<Long, Club> clubs = loadClubsFromMaster();
+        DataSource masterDs = buildMasterDataSource();
 
-        // 2. 创建目标数据源Map，并先放入master
-        Map<Object, Object> targetDataSources = new HashMap<>();
-        DataSource masterDataSource = createMasterDataSource();
-        targetDataSources.put("master", masterDataSource);
+        DynamicDataSource dynamicDataSource = new DynamicDataSource();
 
-        // 3. 为每个社团创建数据源
-        for (Club club : clubs.values()) {
+        // 注入主库和社团库连接参数
+        dynamicDataSource.setMasterDataSource(masterDs);
+        dynamicDataSource.setClubUrlPrefix(clubUrlPrefix);
+        dynamicDataSource.setClubUrlSuffix(clubUrlSuffix);
+        dynamicDataSource.setClubUsername(clubUsername);
+        dynamicDataSource.setClubPassword(clubPassword);
+
+        // AbstractRoutingDataSource.afterPropertiesSet() 要求 targetDataSources 非空，
+        // 传入 master 占位即可（实际路由在 determineTargetDataSource() 中完成）。
+        dynamicDataSource.setTargetDataSources(Map.of("master", masterDs));
+        dynamicDataSource.setDefaultTargetDataSource(masterDs);
+
+        // 预热：启动时把已有社团的连接池注册进来（减少首次登录延迟）
+        List<Club> clubs = loadActiveClubs(masterDs);
+        for (Club club : clubs) {
             try {
-                DataSource dataSource = createClubDataSource(club);
-                targetDataSources.put(club.getId(), dataSource);
-                logger.info("社团数据源创建成功: {} - {}", club.getId(), club.getName());
+                dynamicDataSource.registerClubDataSource(club);
             } catch (Exception e) {
-                logger.error("创建社团数据源失败: {} - {}", club.getId(), club.getName(), e);
+                logger.warn("Failed to pre-warm datasource for club '{}' (id={}): {}",
+                        club.getName(), club.getId(), e.getMessage());
             }
         }
 
-        // 4. 设置默认数据源为 master（主库存放 clubs 表）
-        DataSource defaultDataSource = masterDataSource;
-
-        // 5. 配置动态数据源
-        DynamicDataSource dynamicDataSource = new DynamicDataSource();
-        dynamicDataSource.setTargetDataSources(targetDataSources);
-        dynamicDataSource.setDefaultTargetDataSource(defaultDataSource);
-
-        logger.info("动态数据源初始化完成，共 {} 个数据源", targetDataSources.size());
-
+        logger.info("DynamicDataSource initialized with {} pre-warmed club pools", clubs.size());
         return dynamicDataSource;
     }
 }
