@@ -47,6 +47,12 @@ spring:
     time-zone: GMT+8
     default-property-inclusion: non_null
 
+  # 文件上传限制
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 200MB
+
 # MyBatis Plus配置
 mybatis-plus:
   configuration:
@@ -65,12 +71,9 @@ jwt:
   secret: club-management-secret-key-256-bit-random-string-for-jwt-token-generation
   expiration: 86400000  # 24小时，单位毫秒
 
-# 文件上传配置
 file:
   upload:
     path: uploads  # 文件上传路径（相对于项目根目录，生产环境建议使用绝对路径）
-    max-file-size: 100MB  # 单个文件最大大小
-    max-request-size: 200MB  # 整个请求最大大小
 
 # 日志配置
 logging:

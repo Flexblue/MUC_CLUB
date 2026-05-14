@@ -32,7 +32,10 @@ services:
 
   # ── Spring Boot 后端 ────────────────────────────────────────────────────────
   backend:
-    image: eclipse-temurin:21-jre-jammy
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: muc_club_backend:local
     container_name: muc_club_backend
     restart: unless-stopped
     depends_on:
@@ -52,7 +55,6 @@ services:
       LOGGING_LEVEL_COM_CLUB_MANAGEMENT: INFO
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: WARN
     volumes:
-      - ./backend/target/club-management-1.0.0.jar:/app/app.jar:ro
       - uploads_data:/app/uploads
     working_dir: /app
     command: ["java", "-jar", "app.jar"]
@@ -68,14 +70,16 @@ services:
 
   # ── nginx 前端静态服务 ──────────────────────────────────────────────────────
   frontend:
-    image: nginx:1.25-alpine
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: muc_club_frontend:local
     container_name: muc_club_frontend
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
     volumes:
-      - ./frontend/dist:/usr/share/nginx/html:ro
       - ./scripts/docker-nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "${FRONTEND_PORT:-80}:80"

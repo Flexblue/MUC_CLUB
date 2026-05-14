@@ -386,9 +386,6 @@ cmd_create_test() {
         targets=(club_jsjxh club_lxyx club_szsc)
     fi
 
-    # BCrypt hash of "password"
-    local PW='$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'
-
     echo ""
     local sep="----------------------------------------------------------------"
     local any_failed=false
@@ -412,18 +409,25 @@ cmd_create_test() {
 
         info "在「${club_name}」(${db}, clubId=${club_id}) 中创建测试账号..."
 
-        docker exec muc_club_db bash -c \
-            "MYSQL_PWD=\${MYSQL_ROOT_PASSWORD} mysql -uroot --default-character-set=utf8mb4 ${db} -e \"
+        # 写入临时 SQL 文件再 docker cp 进容器，避免 $PW 中的 $ 被 shell 二次展开
+        local tmp_sql
+        tmp_sql=$(mktemp /tmp/create_test_XXXXXX.sql)
+        cat > "$tmp_sql" << 'SQLEOF'
 INSERT INTO member (stu_id, name, gender, college, role, password) VALUES
-  ('test_chair', '测试社长',   '男', '测试学院', '社长',   '${PW}'),
-  ('test_vchair','测试副社长', '女', '测试学院', '副社长', '${PW}'),
-  ('test_dept',  '测试部长',   '男', '测试学院', '部长',   '${PW}'),
-  ('test_staff', '测试干事',   '女', '测试学院', '干事',   '${PW}')
+  ('test_chair', '测试社长',   '男', '测试学院', '社长',   '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'),
+  ('test_vchair','测试副社长', '女', '测试学院', '副社长', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'),
+  ('test_dept',  '测试部长',   '男', '测试学院', '部长',   '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'),
+  ('test_staff', '测试干事',   '女', '测试学院', '干事',   '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi')
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role);
 INSERT INTO sys_user (stu_id, name, role, password) VALUES
-  ('test_admin', '测试管理员', '系统管理员', '${PW}')
+  ('test_admin', '测试管理员', '系统管理员', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi')
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role);
-\"" 2>&1 || { warn "${db} 创建失败，已跳过"; any_failed=true; continue; }
+SQLEOF
+        docker cp "$tmp_sql" muc_club_db:/tmp/create_test.sql
+        rm -f "$tmp_sql"
+        docker exec muc_club_db bash -c \
+            "MYSQL_PWD=\${MYSQL_ROOT_PASSWORD} mysql -uroot --default-character-set=utf8mb4 ${db} < /tmp/create_test.sql" \
+            2>&1 || { warn "${db} 创建失败，已跳过"; any_failed=true; continue; }
 
         ok "「${club_name}」账号就绪（统一密码: password）"
         echo "     clubId=${club_id}  →  test_admin / test_chair / test_vchair / test_dept / test_staff"
